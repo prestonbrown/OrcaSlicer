@@ -19,6 +19,8 @@
 #include <boost/uuid/uuid_io.hpp>
 #include "fast_float/fast_float.h"
 #include <wx/dir.h>
+#include "BambuAMSProvider.hpp"
+#include "MoonrakerAMSProvider.hpp"
 
 #define CALI_DEBUG
 #define MINUTE_30 1800000    //ms
@@ -7008,6 +7010,76 @@ std::string DeviceManager::load_gcode(std::string type_str, std::string gcode_fi
 
 
     return "";
+}
+
+std::unique_ptr<AMSProvider> MachineObject::get_ams_provider() const
+{
+    // Return cached provider if available
+    if (m_cached_ams_provider) {
+        // Move from cache requires reset of cache for next call
+        std::unique_ptr<AMSProvider> result = std::move(m_cached_ams_provider);
+        m_cached_ams_provider.reset();
+        return result;
+    }
+
+    // Get AMS type from printer configuration or auto-detect
+    std::string ams_type = get_printer_ams_type();
+
+    // Auto-detect if not configured or set to "auto"
+    if (ams_type.empty() || ams_type == "auto") {
+        ams_type = auto_detect_ams_type();
+    }
+
+    // Create provider based on determined type
+    std::unique_ptr<AMSProvider> provider;
+
+    if (ams_type == "moonraker_afc") {
+        auto moonraker_provider = std::make_unique<MoonrakerAMSProvider>(AMSProviderType::MOONRAKER_AFC);
+        if (!dev_ip.empty()) {
+            moonraker_provider->set_printer_url("http://" + dev_ip);
+        }
+        provider = std::move(moonraker_provider);
+    }
+    else if (ams_type == "moonraker_generic") {
+        auto moonraker_provider = std::make_unique<MoonrakerAMSProvider>(AMSProviderType::MOONRAKER_GENERIC);
+        if (!dev_ip.empty()) {
+            moonraker_provider->set_printer_url("http://" + dev_ip);
+        }
+        provider = std::move(moonraker_provider);
+    }
+    else {
+        // Default to Bambu AMS provider (handles "generic", "f1", etc.)
+        provider = std::make_unique<BambuAMSProvider>();
+    }
+
+    return provider;
+}
+
+std::string MachineObject::auto_detect_ams_type() const
+{
+    // Try AFC detection if we have an IP address
+    if (!dev_ip.empty()) {
+        try {
+            auto moonraker_provider = std::make_unique<MoonrakerAMSProvider>(AMSProviderType::MOONRAKER_AFC);
+            moonraker_provider->set_printer_url("http://" + dev_ip);
+
+            // Query printer objects to test for AFC support
+            auto objects_result = moonraker_provider->query_printer_objects({});
+            if (!objects_result.empty() && moonraker_provider->detect_ams_support(objects_result)) {
+                BOOST_LOG_TRIVIAL(info) << boost::format("Auto-detected AFC system at %1%") % dev_ip;
+                return "moonraker_afc";
+            }
+        } catch (const std::exception& e) {
+            BOOST_LOG_TRIVIAL(debug) << boost::format("AFC auto-detection failed: %1%") % e.what();
+        }
+    }
+
+    // Check for Bambu AMS (existing amsList)
+    if (!amsList.empty()) {
+        return "generic";  // Bambu AMS type
+    }
+
+    return "none"; // No AMS detected
 }
 
 void change_the_opacity(wxColour& colour)
