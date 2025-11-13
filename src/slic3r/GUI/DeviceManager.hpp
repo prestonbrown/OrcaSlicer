@@ -1100,6 +1100,13 @@ public:
     void update_printer_preset_name();
     void check_ams_filament_valid();
 
+    // AMS Provider support
+    std::unique_ptr<AMSProvider> get_ams_provider() const;
+    std::string auto_detect_ams_type() const;
+
+private:
+    mutable std::unique_ptr<AMSProvider> m_cached_ams_provider;
+
 };
 
 class DeviceManager

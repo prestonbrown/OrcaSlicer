@@ -117,6 +117,8 @@
 #include "Gizmos/GLGizmoSimplify.hpp" // create suggestion notification
 #include "Gizmos/GLGizmoSVG.hpp" // Drop SVG file
 #include "Gizmos/GizmoObjectManipulation.hpp"
+#include "BambuAMSProvider.hpp"
+#include "MoonrakerAMSProvider.hpp"
 
 // BBS
 #include "Widgets/ProgressDialog.hpp"
@@ -1714,45 +1716,51 @@ std::map<int, DynamicPrintConfig> Sidebar::build_filament_ams_list(MachineObject
     std::map<int, DynamicPrintConfig> filament_ams_list;
     if (!obj) return filament_ams_list;
 
-    auto vt_tray = obj->vt_tray;
-    if (obj->ams_support_virtual_tray) {
-        DynamicPrintConfig vt_tray_config;
-        vt_tray_config.set_key_value("filament_id", new ConfigOptionStrings{ vt_tray.setting_id });
-        vt_tray_config.set_key_value("tag_uid", new ConfigOptionStrings{ vt_tray.tag_uid });
-        vt_tray_config.set_key_value("filament_type", new ConfigOptionStrings{ vt_tray.type });
-        vt_tray_config.set_key_value("tray_name", new ConfigOptionStrings{ std::string("Ext") });
-        vt_tray_config.set_key_value("filament_colour", new ConfigOptionStrings{ into_u8(wxColour("#" + vt_tray.color).GetAsString(wxC2S_HTML_SYNTAX)) });
-        vt_tray_config.set_key_value("filament_exist", new ConfigOptionBools{ true });
-
-        vt_tray_config.set_key_value("filament_multi_colors", new ConfigOptionStrings{});
-        for (int i = 0; i < vt_tray.cols.size(); ++i) {
-            vt_tray_config.opt<ConfigOptionStrings>("filament_multi_colors")->values.push_back(into_u8(wxColour("#" + vt_tray.cols[i]).GetAsString(wxC2S_HTML_SYNTAX)));
+    // Use provider system from DeviceManager
+    try {
+        auto provider = obj->get_ams_provider();
+        if (!provider) {
+            BOOST_LOG_TRIVIAL(warning) << "No AMS provider available";
+            return filament_ams_list;
         }
-        filament_ams_list.emplace(VIRTUAL_TRAY_ID, std::move(vt_tray_config));
-    }
 
-    auto list = obj->amsList;
-    for (auto ams : list) {
-        char n = ams.first.front() - '0' + 'A';
-        for (auto tray : ams.second->trayList) {
-            BOOST_LOG_TRIVIAL(info) << __FUNCTION__
-                << boost::format(": ams %1% tray %2% id %3% color %4%") % ams.first % tray.first % tray.second->setting_id % tray.second->color;
-            char t = tray.first.front() - '0' + '1';
-            DynamicPrintConfig tray_config;
-            tray_config.set_key_value("filament_id", new ConfigOptionStrings{ tray.second->setting_id });
-            tray_config.set_key_value("tag_uid", new ConfigOptionStrings{ tray.second->tag_uid });
-            tray_config.set_key_value("filament_type", new ConfigOptionStrings{ tray.second->type });
-            tray_config.set_key_value("tray_name", new ConfigOptionStrings{ std::string(1, n) + std::string(1, t) });
-            tray_config.set_key_value("filament_colour", new ConfigOptionStrings{ into_u8(wxColour("#" + tray.second->color).GetAsString(wxC2S_HTML_SYNTAX)) });
-            tray_config.set_key_value("filament_exist", new ConfigOptionBools{ tray.second->is_exists });
+        // Handle different provider types
+        if (auto bambu_provider = dynamic_cast<BambuAMSProvider*>(provider.get())) {
+            // Use existing Bambu AMS logic
+            return bambu_provider->build_filament_ams_list(obj);
+        }
+        else if (auto moonraker_provider = dynamic_cast<MoonrakerAMSProvider*>(provider.get())) {
+            // Sync filament info and get AMS units
+            if (moonraker_provider->sync_filament_info()) {
+                auto units = moonraker_provider->get_ams_units();
 
-            tray_config.set_key_value("filament_multi_colors", new ConfigOptionStrings{});
-            for (int i = 0; i < tray.second->cols.size(); ++i) {
-                tray_config.opt<ConfigOptionStrings>("filament_multi_colors")->values.push_back(into_u8(wxColour("#" + tray.second->cols[i]).GetAsString(wxC2S_HTML_SYNTAX)));
+                // Convert to DynamicPrintConfig format
+                int tray_index = 0;
+                for (const auto& unit : units) {
+                    for (const auto& can : unit.cans) {
+                        if (can.is_empty) continue;
+
+                        DynamicPrintConfig tray_config;
+                        tray_config.set_key_value("filament_id", new ConfigOptionStrings{ can.can_id });
+                        tray_config.set_key_value("tag_uid", new ConfigOptionStrings{ can.can_id });
+                        tray_config.set_key_value("filament_type", new ConfigOptionStrings{ can.material_type });
+                        tray_config.set_key_value("tray_name", new ConfigOptionStrings{ unit.unit_name + " " + can.can_id });
+                        tray_config.set_key_value("filament_colour", new ConfigOptionStrings{
+                            into_u8(can.material_colour.GetAsString(wxC2S_HTML_SYNTAX)) });
+                        tray_config.set_key_value("filament_exist", new ConfigOptionBools{ true });
+                        tray_config.set_key_value("filament_multi_colors", new ConfigOptionStrings{});
+
+                        filament_ams_list.emplace(tray_index++, std::move(tray_config));
+                    }
+                }
+                return filament_ams_list;
             }
-            filament_ams_list.emplace(((n - 'A') * 4 + t - '1'), std::move(tray_config));
         }
+    } catch (const std::exception& e) {
+        BOOST_LOG_TRIVIAL(error) << boost::format("AMS provider error: %1%") % e.what();
     }
+
+    // Return empty list if provider fails
     return filament_ams_list;
 }
 
