@@ -17,6 +17,12 @@
 #include "CameraPopup.hpp"
 #include "libslic3r/calib.hpp"
 #include "libslic3r/Utils.hpp"
+
+// Forward declarations for AMS Provider system
+namespace Slic3r { namespace GUI {
+    class AMSProvider;
+}}
+
 #define USE_LOCAL_SOCKET_BIND 0
 
 #define DISCONNECT_TIMEOUT      30000.f     // milliseconds

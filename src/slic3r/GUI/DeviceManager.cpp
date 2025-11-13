@@ -862,6 +862,68 @@ static float calc_color_distance(wxColour c1, wxColour c2)
     return DeltaE76(lab[0][0], lab[0][1], lab[0][2], lab[1][0], lab[1][1], lab[1][2]);
 }
 
+// Helper function to convert AMSProvider units to FilamentInfo for matching algorithm
+static std::vector<FilamentInfo> convert_provider_units_to_filament_info(const std::vector<AMSUnitInfo>& units) {
+    std::vector<FilamentInfo> filament_list;
+    int tray_index = 0;
+
+    for (const auto& unit : units) {
+        for (const auto& can : unit.cans) {
+            // Skip empty cans
+            if (can.is_empty) {
+                tray_index++;
+                continue;
+            }
+
+            FilamentInfo info;
+            info.id = tray_index;
+            info.tray_id = tray_index;
+            info.color = can.material_colour.GetAsString(wxC2S_HTML_SYNTAX).ToStdString();
+            info.type = can.material_type;
+            info.filament_id = can.can_id;
+
+            // For AFC/Moonraker systems, store can_id as both ams_id and slot_id
+            // This allows the mapping system to work correctly
+            info.ams_id = can.can_id;
+            info.slot_id = can.can_id;
+
+            // Material remaining percentage (0-100)
+            info.distance = 0;  // Will be calculated by matching algorithm
+
+            filament_list.push_back(info);
+            tray_index++;
+        }
+    }
+
+    return filament_list;
+}
+
+// Helper function to convert FilamentInfo back to provider-agnostic format
+static std::vector<FilamentInfo> convert_bambu_ams_to_filament_info(const std::map<std::string, Ams*>& amsList) {
+    std::vector<FilamentInfo> tray_info_list;
+    int filament_index_id = 0;
+
+    for (auto ams = amsList.begin(); ams != amsList.end(); ams++) {
+        for (auto tray = ams->second->trayList.begin(); tray != ams->second->trayList.end(); tray++) {
+            FilamentInfo info;
+            info.id = filament_index_id;
+            info.tray_id = filament_index_id;
+            info.color = tray->second->color;
+            info.type = tray->second->get_filament_type();
+            info.ctype = tray->second->ctype;
+            info.colors = tray->second->cols;
+
+            info.ams_id = ams->second->id;
+            info.slot_id = tray->second->id;
+
+            tray_info_list.push_back(info);
+            filament_index_id++;
+        }
+    }
+
+    return tray_info_list;
+}
+
 void MachineObject::get_ams_colors(std::vector<wxColour> &ams_colors) {
     ams_colors.clear();
     ams_colors.reserve(amsList.size());
@@ -880,61 +942,115 @@ int MachineObject::ams_filament_mapping(std::vector<FilamentInfo> filaments, std
     if (filaments.empty())
         return -1;
 
+    // Check if we should use AMS Provider system (for AFC, etc.)
+    std::vector<FilamentInfo> tray_info_list;
+    bool using_provider = false;
+
+    try {
+        auto provider = get_ams_provider();
+        if (provider && provider->get_provider_type() != AMSProviderType::BAMBU_AMS) {
+            // Non-Bambu AMS system - use provider
+            BOOST_LOG_TRIVIAL(info) << "ams_filament_mapping: Using AMS provider system (" << provider->get_provider_name() << ")";
+
+            // Sync filament info from provider
+            if (provider->sync_filament_info()) {
+                // Get AMS units from provider
+                auto units = provider->get_ams_units();
+                if (!units.empty()) {
+                    // Convert provider units to FilamentInfo format
+                    tray_info_list = convert_provider_units_to_filament_info(units);
+                    using_provider = true;
+                    BOOST_LOG_TRIVIAL(info) << boost::format("ams_filament_mapping: Successfully loaded %1% trays from provider") % tray_info_list.size();
+                } else {
+                    BOOST_LOG_TRIVIAL(warning) << "ams_filament_mapping: No AMS units found from provider";
+                }
+            } else {
+                BOOST_LOG_TRIVIAL(warning) << "ams_filament_mapping: Failed to sync filament info from provider";
+            }
+        }
+    } catch (const std::exception& e) {
+        BOOST_LOG_TRIVIAL(warning) << boost::format("ams_filament_mapping: Provider error: %1%, falling back to legacy Bambu AMS") % e.what();
+    }
+
+    // If not using provider, use legacy Bambu AMS implementation
+    if (!using_provider) {
+        BOOST_LOG_TRIVIAL(info) << "ams_filament_mapping: Using legacy Bambu AMS implementation";
+    }
+
     // tray_index : tray_color
     std::map<int, FilamentInfo> tray_filaments;
-    for (auto ams = amsList.begin(); ams != amsList.end(); ams++) {
 
-        std::string ams_id = ams->second->id;
-
-        for (auto tray = ams->second->trayList.begin(); tray != ams->second->trayList.end(); tray++) {
-            int ams_id = atoi(ams->first.c_str());
-            int tray_id = atoi(tray->first.c_str());
-            int tray_index = ams_id * 4 + tray_id;
-            // skip exclude id
-            for (int i = 0; i < exclude_id.size(); i++) {
-                if (tray_index == exclude_id[i])
-                    continue;
+    if (using_provider) {
+        // Build tray_filaments from provider data
+        for (const auto& tray_info : tray_info_list) {
+            // Skip exclude IDs
+            bool skip = false;
+            for (int exclude : exclude_id) {
+                if (tray_info.id == exclude) {
+                    skip = true;
+                    break;
+                }
             }
-            // push
-            if (tray->second->is_tray_info_ready()) {
+            if (!skip) {
+                tray_filaments.emplace(std::make_pair(tray_info.id, tray_info));
+            }
+        }
+    } else {
+        // Build tray_filaments from legacy Bambu AMS
+        for (auto ams = amsList.begin(); ams != amsList.end(); ams++) {
+
+            std::string ams_id = ams->second->id;
+
+            for (auto tray = ams->second->trayList.begin(); tray != ams->second->trayList.end(); tray++) {
+                int ams_id = atoi(ams->first.c_str());
+                int tray_id = atoi(tray->first.c_str());
+                int tray_index = ams_id * 4 + tray_id;
+                // skip exclude id
+                for (int i = 0; i < exclude_id.size(); i++) {
+                    if (tray_index == exclude_id[i])
+                        continue;
+                }
+                // push
+                if (tray->second->is_tray_info_ready()) {
+                    FilamentInfo info;
+                    info.color = tray->second->color;
+                    info.type = tray->second->get_filament_type();
+                    info.id = tray_index;
+                    info.filament_id = tray->second->setting_id;
+                    info.ctype = tray->second->ctype;
+                    info.colors = tray->second->cols;
+
+                    /*for new ams mapping*/
+                    info.ams_id = ams->first.c_str();
+                    info.slot_id = tray->first.c_str();
+
+                    tray_filaments.emplace(std::make_pair(tray_index, info));
+                }
+            }
+        }
+
+        // Build tray info list from legacy Bambu AMS
+        tray_info_list.clear();
+        int flament_index_id = 0;
+        for (auto ams = amsList.begin(); ams != amsList.end(); ams++) {
+            for (auto tray = ams->second->trayList.begin(); tray != ams->second->trayList.end(); tray++) {
+
                 FilamentInfo info;
+                info.id = flament_index_id;
+                info.tray_id = flament_index_id;
                 info.color = tray->second->color;
                 info.type = tray->second->get_filament_type();
-                info.id = tray_index;
-                info.filament_id = tray->second->setting_id;
                 info.ctype = tray->second->ctype;
                 info.colors = tray->second->cols;
 
+
                 /*for new ams mapping*/
-                info.ams_id = ams->first.c_str();
-                info.slot_id = tray->first.c_str();
+                info.ams_id = ams->second->id;
+                info.slot_id = tray->second->id;
 
-                tray_filaments.emplace(std::make_pair(tray_index, info));
+                tray_info_list.push_back(info);
+                flament_index_id++;
             }
-        }
-    }
-
-    // tray info list
-    std::vector<FilamentInfo> tray_info_list;
-    int flament_index_id = 0;
-    for (auto ams = amsList.begin(); ams != amsList.end(); ams++) {
-        for (auto tray = ams->second->trayList.begin(); tray != ams->second->trayList.end(); tray++) {
-
-            FilamentInfo info;
-            info.id = flament_index_id;
-            info.tray_id = flament_index_id;
-            info.color = tray->second->color;
-            info.type = tray->second->get_filament_type();
-            info.ctype = tray->second->ctype;
-            info.colors = tray->second->cols;
-
-
-            /*for new ams mapping*/
-            info.ams_id = ams->second->id;
-            info.slot_id = tray->second->id;
-
-            tray_info_list.push_back(info);
-            flament_index_id++;
         }
     }
 
@@ -7063,11 +7179,13 @@ std::string MachineObject::auto_detect_ams_type() const
             auto moonraker_provider = std::make_unique<MoonrakerAMSProvider>(AMSProviderType::MOONRAKER_AFC);
             moonraker_provider->set_printer_url("http://" + dev_ip);
 
-            // Query printer objects to test for AFC support
-            auto objects_result = moonraker_provider->query_printer_objects({});
-            if (!objects_result.empty() && moonraker_provider->detect_ams_support(objects_result)) {
-                BOOST_LOG_TRIVIAL(info) << boost::format("Auto-detected AFC system at %1%") % dev_ip;
-                return "moonraker_afc";
+            // Try to sync - if it works, AFC is present
+            if (moonraker_provider->sync_filament_info()) {
+                auto units = moonraker_provider->get_ams_units();
+                if (!units.empty()) {
+                    BOOST_LOG_TRIVIAL(info) << boost::format("Auto-detected AFC system at %1%") % dev_ip;
+                    return "moonraker_afc";
+                }
             }
         } catch (const std::exception& e) {
             BOOST_LOG_TRIVIAL(debug) << boost::format("AFC auto-detection failed: %1%") % e.what();
