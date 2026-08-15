@@ -905,13 +905,34 @@ bool MoonrakerPrinterAgent::fetch_moonraker_filament_data(std::vector<AmsTrayDat
         AmsTrayData tray;
         tray.slot_index = lane_index;
         tray.tray_color = safe_json_string(lane_obj, "color");
+        // Passed through verbatim: `material` is expected to already name a type
+        // the preset library carries (ASA-CF, PETG-CF, PCTG and PAHT are all
+        // distinct library types, so collapsing to a base polymer here would
+        // throw away a correct match). first_visible_idx_by_type() owns the
+        // fallback ladder for anything it does not recognise.
         tray.tray_type = safe_json_string(lane_obj, "material");
         tray.bed_temp = safe_json_int(lane_obj, "bed_temp");
         tray.nozzle_temp = safe_json_int(lane_obj, "nozzle_temp");
         tray.has_filament = !tray.tray_type.empty();
+
+        // Vendor and product name are optional. `lane_data` has one agreed
+        // spelling for each, `vendor_name` and `name`, which Happy Hare's
+        // mmu_server.py established and AFC adopted in
+        // AFCProject/AFC-Klipper-Add-On#833. `vendor` / `spool_name` are an
+        // older pair some writers still emit, so they are read as a fallback.
+        // First non-empty wins. A record carrying neither leaves both empty and
+        // match_filament_preset() falls straight through to the plain type
+        // lookup, identical to what this path produced before.
+        std::string vendor = safe_json_string(lane_obj, "vendor_name");
+        if (vendor.empty())
+            vendor = safe_json_string(lane_obj, "vendor");
+        std::string product = safe_json_string(lane_obj, "name");
+        if (product.empty())
+            product = safe_json_string(lane_obj, "spool_name");
+
         auto* bundle = GUI::wxGetApp().preset_bundle;
         tray.tray_info_idx = bundle
-            ? bundle->filaments.filament_id_by_type(tray.tray_type)
+            ? match_filament_preset(bundle->filaments, vendor, product, tray.tray_type)
             : map_filament_type_to_generic_id(tray.tray_type);
 
         max_lane_index = std::max(max_lane_index, lane_index);
