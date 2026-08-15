@@ -14,6 +14,8 @@
 
 namespace Slic3r {
 
+class PresetCollection;
+
 class MoonrakerPrinterAgent : public IPrinterAgent
 {
 public:
@@ -119,6 +121,16 @@ protected:
 
     // Map filament type to OrcaFilamentLibrary preset ID for AMS sync compatibility
     static std::string map_filament_type_to_generic_id(const std::string& filament_type);
+
+    // Score visible compatible filament presets against a spool's vendor/product
+    // metadata and return the best-matching filament_id. See implementation for
+    // scoring details. Falls back to filaments.filament_id_by_type(base_type)
+    // when nothing scores, so empty vendor/brand reproduces the plain
+    // type-only lookup exactly.
+    static std::string match_filament_preset(const PresetCollection& filaments,
+                                             const std::string&      vendor,
+                                             const std::string&      brand_name,
+                                             const std::string&      base_type);
 
 private:
     int handle_request(const std::string& dev_id, const std::string& json_str);
